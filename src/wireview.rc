@@ -1,0 +1,92 @@
+#include <windows.h>
+#include "resource.h"
+
+1 RT_MANIFEST "wireview.manifest"
+
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&Connect...\tCtrl+N", IDM_CONNECT
+        MENUITEM "&Disconnect", IDM_DISCONNECT
+        MENUITEM SEPARATOR
+        MENUITEM "E&xit", IDM_EXIT
+    END
+    POPUP "&Share"
+    BEGIN
+        MENUITEM "&Share this screen", IDM_SHARE
+        MENUITEM "Allow remote &control", IDM_ALLOW_CONTROL
+        MENUITEM "&Ask before accepting a viewer", IDM_ASK
+        MENUITEM "Share when WireView &starts", IDM_SHARE_STARTUP
+        POPUP "&Monitor"
+        BEGIN
+            MENUITEM "(none)", IDM_MONITOR_BASE, GRAYED
+        END
+        MENUITEM "&Disconnect viewer", IDM_KICK
+        MENUITEM SEPARATOR
+        MENUITEM "Allow through &firewall...", IDM_FIREWALL
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Full screen\tF11", IDM_FULLSCREEN
+        MENUITEM "Show remote &pointer", IDM_SHOW_POINTER
+        MENUITEM "&Refresh\tF5", IDM_REFRESH
+    END
+    POPUP "&Control"
+    BEGIN
+        MENUITEM "&Take control\tCtrl+Alt+F12", IDM_TAKE_CONTROL
+    END
+    POPUP "&Help"
+    BEGIN
+        MENUITEM "&About WireView", IDM_ABOUT
+    END
+END
+
+IDR_ACCEL ACCELERATORS
+BEGIN
+    "N", IDM_CONNECT, VIRTKEY, CONTROL
+    VK_F11, IDM_FULLSCREEN, VIRTKEY
+    VK_F5, IDM_REFRESH, VIRTKEY
+    VK_F12, IDM_TAKE_CONTROL, VIRTKEY, CONTROL, ALT
+END
+
+IDD_CONNECT DIALOGEX 0, 0, 260, 186
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Connect"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT "PCs sharing their screen (USB4 links are listed first):", -1, 7, 7, 246, 9
+    LISTBOX IDC_PEERS, 7, 18, 246, 74, LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_BORDER | WS_TABSTOP
+    PUSHBUTTON "&Search again", IDC_SEARCH, 7, 96, 64, 14
+    LTEXT "", IDC_SEARCH_STATUS, 77, 99, 176, 9
+    LTEXT "&Address:", -1, 7, 120, 40, 9
+    EDITTEXT IDC_ADDRESS, 50, 118, 140, 12, ES_AUTOHSCROLL
+    LTEXT "&Port:", -1, 197, 120, 20, 9
+    EDITTEXT IDC_PORT, 218, 118, 35, 12, ES_NUMBER
+    AUTOCHECKBOX "Ask to &control the other PC", IDC_WANT_CONTROL, 7, 138, 200, 10
+    DEFPUSHBUTTON "Connect", IDOK, 149, 165, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 203, 165, 50, 14
+END
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "WireView"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "ProductName", "WireView"
+            VALUE "ProductVersion", "0.1.0"
+            VALUE "LegalCopyright", "GPL-3.0-or-later"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
