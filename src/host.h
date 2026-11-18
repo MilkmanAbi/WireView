@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "capture.h"
+#include "codec.h"
 #include "inject.h"
 #include "net.h"
 
@@ -53,6 +54,8 @@ private:
         std::vector<uint8_t> bytes;  // complete message (header + payload), or frame header + metadata
         bool frame = false;
         int slot = -1;
+        uint32_t quality = 0;  // frame only: 0 = raw rows, else JPEG quality
+        uint32_t seq = 0;
         CaptureJob job;  // frame only
     };
 
@@ -83,6 +86,9 @@ private:
     std::atomic<bool> dead_{false};
     std::atomic<bool> wantsControl_{false};
     std::atomic<bool> fullRequested_{false};
+    // Stream settings asked for by the viewer; applied by the capture loop.
+    std::atomic<uint32_t> wantMaxHeight_{0}, wantQuality_{0};
+    std::atomic<bool> settingsChanged_{false};
     std::deque<OutItem> queue_;
     bool slotBusy_[Capture::kSlots] = {};
     std::atomic<uint64_t> frames_{0}, bytes_{0};

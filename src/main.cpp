@@ -32,7 +32,21 @@ constexpr UINT_PTR kStatsTimer = 1;
 const wchar_t kMainClass[] = L"WireViewMain";
 const wchar_t kViewClass[] = L"WireViewView";
 const wchar_t kRegKey[] = L"Software\\WireView";
-const char kVersion[] = "0.1.0";
+const char kVersion[] = "0.2.0";
+
+// How the picture is sent. maxHeight 0 = native size, quality 0 = raw pixels.
+struct Preset {
+    const wchar_t* name;
+    uint32_t maxHeight, quality;
+};
+const Preset kPresets[] = {
+    {L"Automatic (raw on a USB4 link, else compressed 720p)", 0, 0},
+    {L"Raw, full resolution (USB4)", 0, 0},
+    {L"Compressed, full resolution", 0, 85},
+    {L"Compressed, 1080p", 1080, 80},
+    {L"Compressed, 720p (Wi-Fi, hotspot, slow links)", 720, 75},
+};
+constexpr DWORD kPresetCount = DWORD(sizeof kPresets / sizeof kPresets[0]);
 
 struct AskRequest {
     std::string address, name;
@@ -48,6 +62,7 @@ struct Settings {
     bool wantControl = true;
     bool showPointer = true;
     DWORD monitor = 0;
+    DWORD picture = 0;  // index into kPresets
 };
 
 struct App {
@@ -68,6 +83,8 @@ struct App {
     bool shuttingDown = false;
     bool stoppingHost = false;
     std::string viewText;
+    uint32_t nativeW = 0, nativeH = 0, streamFormat = 0;
+    bool directLink = false;  // the current connection runs over a USB4 / Thunderbolt adapter
     std::string shareError;
 
     HCURSOR remoteCursor = nullptr;
@@ -115,6 +132,8 @@ void load_settings() {
     c.wantControl = reg_dword(L"WantControl", 1) != 0;
     c.showPointer = reg_dword(L"ShowPointer", 1) != 0;
     c.monitor = reg_dword(L"Monitor", 0);
+    c.picture = reg_dword(L"Picture", 0);
+    if (c.picture >= kPresetCount) c.picture = 0;
 }
 
 void save_settings() {
@@ -127,6 +146,7 @@ void save_settings() {
     reg_set(L"WantControl", c.wantControl);
     reg_set(L"ShowPointer", c.showPointer);
     reg_set(L"Monitor", c.monitor);
+    reg_set(L"Picture", c.picture);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -194,6 +214,21 @@ void update_title() {
     SetWindowTextW(g.main, t.c_str());
 }
 
+// True if address is an IPv4 literal reached through a USB4 / Thunderbolt adapter.
+bool is_direct_link(const std::string& address) {
+    in_addr a{};
+    if (inet_pton(AF_INET, address.c_str(), &a) != 1) return false;
+    const auto adapters = list_adapters();
+    const Adapter* ad = adapter_for(adapters, a.s_addr);
+    return ad && ad->directLink;
+}
+
+StreamSettingsMsg picture_settings(DWORD preset, bool directLink) {
+    if (preset >= kPresetCount) preset = 0;
+    if (preset == 0) return directLink ? StreamSettingsMsg{0, 0} : StreamSettingsMsg{kPresets[4].maxHeight, kPresets[4].quality};
+    return {kPresets[preset].maxHeight, kPresets[preset].quality};
+}
+
 // ------------------------------------------------------------------ control
 
 LRESULT CALLBACK keyboard_hook(int code, WPARAM wp, LPARAM lp) {
@@ -244,7 +279,8 @@ void set_controlling(bool on) {
 
 bool to_remote(int cx, int cy, int32_t& rx, int32_t& ry) {
     const RECT r = g.renderer.image_rect();
-    const uint32_t w = g.renderer.image().width(), h = g.renderer.image().height();
+    // Input is always in the other PC's native pixels, whatever size the picture is streamed at.
+    const uint32_t w = g.nativeW, h = g.nativeH;
     if (r.right <= r.left || r.bottom <= r.top || !w || !h) return false;
     rx = int32_t((int64_t(cx - r.left) * w) / (r.right - r.left));
     ry = int32_t((int64_t(cy - r.top) * h) / (r.bottom - r.top));
@@ -272,6 +308,10 @@ void apply_packets() {
                 memcpy(&m, p.data.data(), sizeof m);
                 std::string err;
                 if (!g.renderer.image().set_mode(m.width, m.height, err)) g.viewText = err;
+                g.nativeW = m.nativeWidth;
+                g.nativeH = m.nativeHeight;
+                g.streamFormat = m.format;
+                g.renderer.set_pointer_scale(m.nativeWidth ? float(m.width) / float(m.nativeWidth) : 1.f);
                 break;
             }
             case kMsgFrame: {
@@ -328,6 +368,7 @@ void disconnect() {
     g.viewer.stop(join_pumping);
     g.viewing = false;
     g.granted = false;
+    g.nativeW = g.nativeH = g.streamFormat = 0;
     g.renderer.image().reset();
     ShowWindow(g.view, SW_HIDE);
     InvalidateRect(g.main, nullptr, TRUE);
@@ -339,7 +380,9 @@ void connect_to(const std::wstring& address, uint16_t port, bool wantControl) {
     g.viewText = "Connecting to " + to_utf8(address) + "...";
     set_status(0, g.viewText);
     HWND hwnd = g.main;
-    g.viewer.start(to_utf8(address), port, wantControl,
+    g.directLink = is_direct_link(to_utf8(address));
+    const StreamSettingsMsg st = picture_settings(g.cfg.picture, g.directLink);
+    g.viewer.start(to_utf8(address), port, wantControl, st.maxHeight, st.quality,
                    [hwnd](ViewerConn::Event e) { PostMessageW(hwnd, WM_APP_VIEWER, WPARAM(e), 0); });
 }
 
@@ -496,6 +539,8 @@ INT_PTR CALLBACK connect_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
             SetDlgItemTextW(dlg, IDC_ADDRESS, g.cfg.address.c_str());
             SetDlgItemInt(dlg, IDC_PORT, g.cfg.port, FALSE);
             CheckDlgButton(dlg, IDC_WANT_CONTROL, g.cfg.wantControl ? BST_CHECKED : BST_UNCHECKED);
+            for (const Preset& pr : kPresets) SendDlgItemMessageW(dlg, IDC_PICTURE, CB_ADDSTRING, 0, LPARAM(pr.name));
+            SendDlgItemMessageW(dlg, IDC_PICTURE, CB_SETCURSEL, g.cfg.picture, 0);
             PostMessageW(dlg, WM_COMMAND, IDC_SEARCH, 0);
             return TRUE;
         case WM_COMMAND:
@@ -528,6 +573,8 @@ INT_PTR CALLBACK connect_proc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp) {
                     g.cfg.address = a;
                     g.cfg.port = port;
                     g.cfg.wantControl = IsDlgButtonChecked(dlg, IDC_WANT_CONTROL) == BST_CHECKED;
+                    const LRESULT pic = SendDlgItemMessageW(dlg, IDC_PICTURE, CB_GETCURSEL, 0, 0);
+                    if (pic >= 0 && pic < LRESULT(kPresetCount)) g.cfg.picture = DWORD(pic);
                     save_settings();
                     EndDialog(dlg, IDOK);
                     return TRUE;
@@ -551,6 +598,16 @@ void fill_monitor_menu(HMENU menu) {
         const std::wstring text = L"&" + std::to_wstring(i + 1) + L"  " + to_wide(monitors[i].name);
         AppendMenuW(menu, MF_STRING | (i == g.cfg.monitor ? MF_CHECKED : 0), UINT(IDM_MONITOR_BASE + i), text.c_str());
     }
+}
+
+void fill_picture_menu(HMENU menu) {
+    while (GetMenuItemCount(menu) > 0) DeleteMenu(menu, 0, MF_BYPOSITION);
+    for (DWORD i = 0; i < kPresetCount; ++i) {
+        AppendMenuW(menu, MF_STRING, IDM_PICTURE_BASE + i, kPresets[i].name);
+        if (i == 0) AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    CheckMenuRadioItem(menu, IDM_PICTURE_BASE, IDM_PICTURE_BASE + kPresetCount - 1, IDM_PICTURE_BASE + g.cfg.picture,
+                       MF_BYCOMMAND);
 }
 
 void update_menu(HMENU m) {
@@ -665,13 +722,22 @@ void on_command(UINT id) {
             break;
         case IDM_ABOUT: {
             std::wstring text = L"WireView " + to_wide(kVersion) +
-                                L"\n\nUncompressed screen view and control between two Windows PCs over a USB4"
-                                L" cable, or any network.\n\nFree software under the GNU GPL v3.\n"
+                                L"\n\nScreen view and control between two Windows PCs: raw pixels over a USB4"
+                                L" cable, or compressed over slower links.\n\nFree software under the GNU GPL v3.\n"
                                 L"https://github.com/MilkmanAbi/WireView";
             MessageBoxW(g.main, text.c_str(), L"About WireView", MB_OK | MB_ICONINFORMATION);
             break;
         }
         default:
+            if (id >= IDM_PICTURE_BASE && id < IDM_PICTURE_BASE + kPresetCount) {
+                g.cfg.picture = id - IDM_PICTURE_BASE;
+                save_settings();
+                if (g.viewing) {
+                    const StreamSettingsMsg st = picture_settings(g.cfg.picture, g.directLink);
+                    g.viewer.set_stream(st.maxHeight, st.quality);
+                }
+                break;
+            }
             if (id >= IDM_MONITOR_BASE && id < IDM_MONITOR_BASE + 32) {
                 g.cfg.monitor = id - IDM_MONITOR_BASE;
                 if (g.host) g.host->set_monitor(int(g.cfg.monitor));
@@ -701,8 +767,8 @@ void update_stats() {
     char buf[96];
     std::string left = g.viewText.empty() ? "Not connected" : g.viewText;
     if (g.viewing) {
-        std::snprintf(buf, sizeof buf, "  |  %ux%u  %.0f fps  ", g.renderer.image().width(), g.renderer.image().height(),
-                      g.viewFps);
+        std::snprintf(buf, sizeof buf, "  |  %ux%u %s  %.0f fps  ", g.renderer.image().width(),
+                      g.renderer.image().height(), g.streamFormat == kFormatEncoded ? "compressed" : "raw", g.viewFps);
         left += buf + format_bps(g.viewBps);
         left += g.controlling ? "  |  Controlling" : g.granted ? "  |  Control available" : "  |  View only";
     }
@@ -852,6 +918,7 @@ LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             HMENU menu = HMENU(wp);
             const UINT first = GetMenuItemID(menu, 0);
             if (first >= IDM_MONITOR_BASE && first < IDM_MONITOR_BASE + 32) fill_monitor_menu(menu);
+            if (first >= IDM_PICTURE_BASE && first < IDM_PICTURE_BASE + kPresetCount) fill_picture_menu(menu);
             update_menu(GetMenu(hwnd));
             return 0;
         }

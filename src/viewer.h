@@ -29,7 +29,9 @@ public:
 
     ~ViewerConn() { stop(); }
 
-    void start(const std::string& host, uint16_t port, bool wantControl, EventFn fn);
+    // maxHeight / quality: see StreamSettingsMsg.
+    void start(const std::string& host, uint16_t port, bool wantControl, uint32_t maxHeight, uint32_t quality,
+               EventFn fn);
     void stop(const std::function<void(std::thread&)>& join = nullptr);
     bool active() const { return thread_.joinable(); }
 
@@ -39,6 +41,7 @@ public:
 
     void send_input(const InputEvent* events, size_t count);
     void request_full();
+    void set_stream(uint32_t maxHeight, uint32_t quality);  // takes effect live
 
     std::string error() const;
     std::string remote_name() const;
@@ -47,7 +50,7 @@ public:
     uint64_t bytes_received() const { return bytes_; }
 
 private:
-    void run(std::string host, uint16_t port, bool wantControl);
+    void run(std::string host, uint16_t port, bool wantControl, uint32_t maxHeight, uint32_t quality);
     void recv_loop();
     void send_loop();
     void fail(const std::string& msg);
@@ -69,6 +72,8 @@ private:
 
     std::vector<InputEvent> input_;
     bool wantFull_ = false;
+    bool settingsPending_ = false;
+    StreamSettingsMsg settings_{};
 };
 
 }  // namespace wv

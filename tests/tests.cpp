@@ -9,7 +9,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cmath>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <random>
 #include <string>
@@ -17,6 +19,7 @@
 #include <vector>
 
 #include "capture.h"
+#include "codec.h"
 #include "cursor.h"
 #include "discovery.h"
 #include "host.h"
@@ -257,6 +260,148 @@ static void test_fit() {
     CHECK(r.right == 0);
 }
 
+
+static void test_stream_size() {
+    std::printf("stream_size / settings\n");
+    uint32_t w = 0, h = 0;
+    stream_size(2496, 1664, 720, w, h);
+    CHECK(h == 720 && w == 1080);
+    stream_size(1920, 1080, 720, w, h);
+    CHECK(h == 720 && w == 1280);
+    stream_size(1920, 1080, 0, w, h);
+    CHECK(w == 1920 && h == 1080);
+    stream_size(1280, 720, 1080, w, h);  // never upscale
+    CHECK(w == 1280 && h == 720);
+    CHECK(stream_settings_valid(0, 0) && stream_settings_valid(720, 75) && stream_settings_valid(1080, 100));
+    CHECK(!stream_settings_valid(100, 75) && !stream_settings_valid(720, 101));
+}
+
+static void test_jpeg() {
+    std::printf("JPEG codec round trip\n");
+    ComScope com;
+    RectCodec codec;
+    CHECK(codec.init());
+    // A smooth gradient with some text-like edges, inside a larger pitched buffer.
+    const uint32_t W = 200, H = 120, pitch = 256 * 4;
+    std::vector<uint8_t> src(size_t(pitch) * H, 0);
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x) {
+            uint8_t* px = &src[size_t(y) * pitch + x * 4];
+            px[0] = uint8_t(x);
+            px[1] = uint8_t(y * 2);
+            px[2] = ((x / 8 + y / 8) % 2) ? 200 : 60;
+            px[3] = uint8_t(x * 7);  // undefined alpha must not matter
+        }
+    std::vector<uint8_t> jpg;
+    CHECK(codec.encode_jpeg(src.data(), pitch, W, H, 75, jpg));
+    CHECK(!jpg.empty() && jpg.size() < size_t(W) * H * 4 / 4);
+    std::vector<uint8_t> out(size_t(W) * H * 4);
+    CHECK(codec.decode_jpeg(jpg.data(), jpg.size(), W, H, out.data(), W * 4));
+    double err = 0;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+            for (int c = 0; c < 3; ++c)
+                err += std::abs(int(out[(size_t(y) * W + x) * 4 + c]) - int(src[size_t(y) * pitch + x * 4 + c]));
+    err /= double(W) * H * 3;
+    std::printf("  %zu bytes (raw %u), mean error %.2f levels\n", jpg.size(), W * H * 4, err);
+    CHECK(err < 12.0);  // lossy by design; this image is mostly hard edges
+    // Wrong size claims and garbage must fail, not crash.
+    std::vector<uint8_t> wide(size_t(W + 1) * H * 4);
+    CHECK(!codec.decode_jpeg(jpg.data(), jpg.size(), W + 1, H, wide.data(), (W + 1) * 4));
+    std::vector<uint8_t> garbage(500, 0x5A);
+    CHECK(!codec.decode_jpeg(garbage.data(), garbage.size(), W, H, out.data(), W * 4));
+    codec.decode_jpeg(jpg.data(), jpg.size() / 2, W, H, out.data(), W * 4);  // truncated: must not crash
+}
+
+static void test_palette() {
+    std::printf("palette codec (lossless text/UI)\n");
+    ComScope com;
+    RectCodec codec;
+    CHECK(codec.init());
+    // "Text": dark glyph-like strokes on a white window, 3 colours, padded pitch, junk alpha.
+    const uint32_t W = 300, H = 40, pitch = 320 * 4;
+    std::vector<uint8_t> src(size_t(pitch) * H);
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x) {
+            uint32_t c = 0xFFFFFF;
+            if ((x % 9 < 2 || y % 13 == 6) && y > 8 && y < 32) c = 0x202020;
+            if (x > 280) c = 0x0078D4;
+            c |= uint32_t((x * 31) & 0xFF) << 24;
+            std::memcpy(&src[size_t(y) * pitch + x * 4], &c, 4);
+        }
+    std::vector<uint8_t> enc;
+    CHECK(codec.encode_palette(src.data(), pitch, W, H, enc));
+    std::printf("  %zu bytes (raw %u)\n", enc.size(), W * H * 4);
+    CHECK(enc.size() < size_t(W) * H * 4 / 20);
+    std::vector<uint8_t> out(size_t(W) * H * 4);
+    CHECK(codec.decode_palette(enc.data(), enc.size(), W, H, out.data(), W * 4));
+    bool exact = true;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+            exact &= std::memcmp(&out[(size_t(y) * W + x) * 4], &src[size_t(y) * pitch + x * 4], 3) == 0;
+    CHECK(exact);  // lossless
+    CHECK(codec.encode(src.data(), pitch, W, H, 75, enc) == kRectPalette);
+
+    // A photo-like area has too many colours: palette refuses, encode() picks JPEG.
+    std::vector<uint8_t> photo(size_t(W) * H * 4);
+    for (size_t i = 0; i < photo.size(); ++i) photo[i] = uint8_t((i * 7919) >> 3);
+    CHECK(!codec.encode_palette(photo.data(), W * 4, W, H, enc));
+    CHECK(codec.encode(photo.data(), W * 4, W, H, 75, enc) != kRectPalette);
+
+    // Corrupt data must fail cleanly.
+    std::vector<uint8_t> bad = enc;
+    CHECK(codec.encode_palette(src.data(), pitch, W, H, bad));
+    bad[0] = 0;  // zero colours
+    CHECK(!codec.decode_palette(bad.data(), bad.size(), W, H, out.data(), W * 4));
+    CHECK(codec.encode_palette(src.data(), pitch, W, H, bad));
+    std::vector<uint8_t> tall(size_t(W) * (H + 1) * 4);
+    CHECK(!codec.decode_palette(bad.data(), bad.size(), W, H + 1, tall.data(), W * 4));
+    CHECK(codec.encode_palette(src.data(), pitch, W, H, bad));
+    bad[0] = 2;  // claims 2 colours, but indices use 3
+    // (colour table now shorter: the stream is misaligned or an index is out of range, either way it must fail)
+    CHECK(!codec.decode_palette(bad.data(), bad.size(), W, H, out.data(), W * 4));
+    std::vector<uint8_t> trunc(enc.begin(), enc.begin() + 4 + 3 * 4 + 2);
+    CHECK(!codec.decode_palette(trunc.data(), trunc.size(), W, H, out.data(), W * 4));
+}
+
+static void test_parse_encoded() {
+    std::printf("parse_encoded_frame\n");
+    const uint32_t W = 64, H = 48;
+    auto build = [](std::vector<Rect> rects, std::vector<std::pair<uint8_t, std::vector<uint8_t>>> data) {
+        std::vector<uint8_t> out(sizeof(FrameMsg));
+        FrameMsg f{3, 0, uint16_t(rects.size())};
+        std::memcpy(out.data(), &f, sizeof f);
+        for (auto& r : rects) out.insert(out.end(), reinterpret_cast<uint8_t*>(&r), reinterpret_cast<uint8_t*>(&r) + sizeof r);
+        for (auto& d : data) {
+            RectData rd{d.first, {0, 0, 0}, uint32_t(d.second.size())};
+            out.insert(out.end(), reinterpret_cast<uint8_t*>(&rd), reinterpret_cast<uint8_t*>(&rd) + sizeof rd);
+            out.insert(out.end(), d.second.begin(), d.second.end());
+        }
+        return out;
+    };
+    EncodedFrameView ef;
+    auto ok = build({{0, 0, 4, 2}, {10, 10, 30, 30}}, {{kRectRaw, std::vector<uint8_t>(32)}, {kRectJpeg, std::vector<uint8_t>(100)}});
+    CHECK(parse_encoded_frame(ok.data(), ok.size(), W, H, ef) && ef.rects.size() == 2 && ef.rects[1].size == 100);
+    auto pal = build({{0, 0, 4, 2}}, {{kRectPalette, std::vector<uint8_t>(20)}});
+    CHECK(parse_encoded_frame(pal.data(), pal.size(), W, H, ef) && ef.rects[0].encoding == kRectPalette);
+    auto bad = build({{0, 0, 4, 2}}, {{kRectRaw, std::vector<uint8_t>(31)}});  // raw size must match
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+    bad = build({{0, 0, 4, 2}}, {{kRectJpeg, std::vector<uint8_t>(33)}});  // "JPEG" bigger than raw
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+    bad = build({{0, 0, 4, 2}}, {{kRectJpeg, std::vector<uint8_t>()}});  // empty JPEG
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+    bad = build({{0, 0, 4, 2}}, {{uint8_t(7), std::vector<uint8_t>(32)}});  // unknown encoding
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+    bad = ok;
+    bad.pop_back();  // length runs past the end
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+    bad = ok;
+    bad.push_back(0);  // trailing byte
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+    bad = build({{0, 0, 65, 2}}, {{kRectRaw, std::vector<uint8_t>(65 * 2 * 4)}});  // off screen
+    CHECK(!parse_encoded_frame(bad.data(), bad.size(), W, H, ef));
+}
+
 // GPU apply (moves through a temp texture, UpdateSubresource rects) must equal the CPU reference.
 static void test_gpu_apply() {
     std::printf("GpuImage on WARP vs CPU reference\n");
@@ -319,8 +464,8 @@ struct TestViewer {
     std::condition_variable cv;
     std::vector<ViewerConn::Event> events;
 
-    void start(uint16_t port, bool wantControl) {
-        conn.start("127.0.0.1", port, wantControl, [this](ViewerConn::Event e) {
+    void start(uint16_t port, bool wantControl, uint32_t maxHeight = 0, uint32_t quality = 0) {
+        conn.start("127.0.0.1", port, wantControl, maxHeight, quality, [this](ViewerConn::Event e) {
             std::lock_guard<std::mutex> lock(mu);
             events.push_back(e);
             cv.notify_all();
@@ -368,7 +513,7 @@ static void test_loopback() {
     CHECK(v.wait_for(ViewerConn::Event::Connected, 5000));
     CHECK(!v.conn.control_granted_at_start());
 
-    uint32_t w = 0, h = 0;
+    uint32_t w = 0, h = 0, nativeW = 0, nativeH = 0, format = 0;
     std::vector<uint8_t> image;
     int fullFrames = 0, frames = 0, bad = 0;
     bool gotGrant = false, grantValue = false;
@@ -384,6 +529,9 @@ static void test_loopback() {
                     std::memcpy(&m, p.data.data(), sizeof m);
                     w = m.width;
                     h = m.height;
+                    nativeW = m.nativeWidth;
+                    nativeH = m.nativeHeight;
+                    format = m.format;
                     image.assign(size_t(w) * h * 4, 0);
                 } else if (p.type == kMsgFrame) {
                     FrameView f;
@@ -408,7 +556,7 @@ static void test_loopback() {
     };
     pump(1500);
     std::printf("  mode %ux%u, %d frames (%d full), %d bad\n", w, h, frames, fullFrames, bad);
-    CHECK(w > 0 && h > 0);
+    CHECK(w > 0 && h > 0 && w == nativeW && h == nativeH && format == kFormatBGRA8);
     CHECK(fullFrames >= 1);
     CHECK(bad == 0);
     // Some pixel must be non-zero: we really captured something.
@@ -475,6 +623,77 @@ static void test_loopback() {
             while ((n = recv(s, sinkBuf.data(), int(sinkBuf.size()), 0)) > 0) {
             }
             CHECK(n == 0);  // orderly close by the host, not a timeout
+            closesocket(s);
+        }
+    }
+    // 6. Compressed 720p: smaller stream, frames still parse (decoded by the viewer), far fewer bytes,
+    //    and input is still in native pixels.
+    {
+        TestViewer cv;
+        cv.start(port, true, 720, 75);
+        CHECK(cv.wait_for(ViewerConn::Event::Connected, 5000));
+        uint32_t sw = 0, sh = 0, nw = 0, nh = 0, fmt = 0;
+        int frames2 = 0, bad2 = 0, full2 = 0;
+        const uint64_t bytes0 = cv.conn.bytes_received();
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        bool asked = false;
+        while (std::chrono::steady_clock::now() < end) {
+            std::deque<ViewerConn::Packet> q;
+            cv.conn.take(q);
+            for (auto& p : q) {
+                if (p.type == kMsgMode) {
+                    ModeMsg m;
+                    std::memcpy(&m, p.data.data(), sizeof m);
+                    sw = m.width, sh = m.height, nw = m.nativeWidth, nh = m.nativeHeight, fmt = m.format;
+                } else if (p.type == kMsgFrame) {
+                    FrameView f;
+                    if (!parse_frame(p.data.data(), p.data.size(), sw, sh, f)) {
+                        ++bad2;
+                        continue;
+                    }
+                    ++frames2;
+                    // Full frames arrive as non-overlapping tiles covering the whole stream.
+                    uint64_t covered = 0;
+                    for (uint32_t i = 0; i < f.rectCount; ++i) covered += rect_pixels(f.rects[i]);
+                    if (f.moveCount == 0 && covered == uint64_t(sw) * sh) ++full2;
+                }
+                cv.conn.recycle(std::move(p.data));
+            }
+            if (!asked && full2 >= 1) {
+                cv.conn.request_full();
+                asked = true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        const uint64_t got = cv.conn.bytes_received() - bytes0;
+        std::printf("  720p: stream %ux%u of %ux%u, %d frames (%d full), %d bad, %llu bytes (one raw full frame = %llu)\n",
+                    sw, sh, nw, nh, frames2, full2, bad2, (unsigned long long)got,
+                    (unsigned long long)(uint64_t(nw) * nh * 4));
+        CHECK(sh == 720 && nh > 720 && sw < nw && fmt == kFormatEncoded);
+        CHECK(full2 >= 2 && bad2 == 0);
+        CHECK(got < uint64_t(nw) * nh * 4 / 4);  // two+ full frames for less than a quarter of one raw frame
+        // Input stays in native pixels: x = native width - 1 must reach the far right of the monitor.
+        const size_t before = sink.count();
+        InputEvent mv{kInMove, 0, 0, int32_t(nw) - 1, int32_t(nh) - 1};
+        cv.conn.send_input(&mv, 1);
+        for (int i = 0; i < 50 && sink.count() == before; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        CHECK(sink.count() == before + 1);
+        cv.conn.stop();
+        for (int i = 0; i < 100 && host.has_viewer(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    // 7. A 0.1.0 viewer (72-byte Hello, version 1) is told "wrong version" at once, not after a timeout.
+    {
+        SOCKET s = tcp_connect("127.0.0.1", port, 3000, err);
+        CHECK(s != INVALID_SOCKET);
+        if (s != INVALID_SOCKET) {
+            uint8_t old[72] = {'W', 'V', 'W', '1', 1, 0};
+            const auto t0 = std::chrono::steady_clock::now();
+            Welcome wel{};
+            set_recv_timeout(s, 4000);
+            CHECK(send_all(s, old, sizeof old) && recv_all(s, &wel, sizeof wel));
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            CHECK(wel.status == kWelcomeBadVersion && ms < 1000);
             closesocket(s);
         }
     }
@@ -546,7 +765,7 @@ static void bench() {
 
     std::printf("bench: capture full frames (copy to staging + map)\n");
     Capture cap;
-    if (!cap.open(0, err)) {
+    if (!cap.open(0, 0, err)) {
         std::printf("  %s\n", err.c_str());
         return;
     }
@@ -571,6 +790,45 @@ static void bench() {
     const double cs = std::chrono::duration<double>(std::chrono::steady_clock::now() - c0).count();
     std::printf("  %d full %ux%u frames in %.2f s = %.1f ms each\n", got, cap.width(), cap.height(), cs,
                 got ? cs * 1000 / got : 0.0);
+
+    std::printf("bench: 720p stream, whole frame as one rect: GPU scale + encode/decode (this screen)\n");
+    cap.close();
+    if (!cap.open(0, 720, err)) {
+        std::printf("  %s\n", err.c_str());
+        return;
+    }
+    ComScope com;
+    RectCodec codec;
+    codec.init();
+    cap.next(1000, true, 0, job, err);
+    cap.unmap(0);
+    for (uint32_t q : {75u, 85u}) {
+        double encMs = 0, decMs = 0;
+        size_t jpgBytes = 0;
+        int n = 0;
+        uint8_t lastEnc = 0;
+        std::vector<uint8_t> jpg, back(size_t(cap.width()) * cap.height() * 4);
+        for (int i = 0; i < 20; ++i) {
+            slot = i & 1;
+            cap.unmap(slot);
+            if (cap.next(0, true, slot, job, err) != Capture::Status::Ok || !job.data) continue;
+            auto e0 = std::chrono::steady_clock::now();
+            const uint8_t e = codec.encode(job.data, job.pitch, cap.width(), cap.height(), q, jpg);
+            auto t1 = std::chrono::steady_clock::now();
+            if (e != kRectRaw) codec.decode(e, jpg.data(), jpg.size(), cap.width(), cap.height(), back.data(), cap.width() * 4);
+            lastEnc = e;
+            auto t2 = std::chrono::steady_clock::now();
+            encMs += std::chrono::duration<double, std::milli>(t1 - e0).count();
+            decMs += std::chrono::duration<double, std::milli>(t2 - t1).count();
+            jpgBytes += jpg.size();
+            ++n;
+        }
+        if (n)
+            std::printf("  %ux%u q%u (%s): %.0f KB per full frame (raw %.0f KB), encode %.1f ms, decode %.1f ms"
+                        " -> full-screen motion at 30 fps = %s\n",
+                        cap.width(), cap.height(), q, lastEnc == kRectPalette ? "palette" : lastEnc == kRectJpeg ? "jpeg" : "raw", jpgBytes / n / 1024.0, cap.width() * cap.height() * 4 / 1024.0,
+                        encMs / n, decMs / n, format_bps(jpgBytes / double(n) * 8 * 30).c_str());
+    }
 }
 
 int main(int argc, char** argv) {
@@ -587,6 +845,10 @@ int main(int argc, char** argv) {
     test_injector();
     test_pointer();
     test_fit();
+    test_stream_size();
+    test_jpeg();
+    test_palette();
+    test_parse_encoded();
     test_gpu_apply();
     test_loopback();
     test_discovery();

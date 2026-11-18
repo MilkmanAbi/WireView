@@ -1,5 +1,7 @@
 #include "host.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 
 namespace wv {
@@ -98,10 +100,12 @@ void Host::push(OutItem&& item) {
 }
 
 void Host::run_session(SOCKET s) {
-    // Handshake.
+    // Handshake. Read magic + version first: an older viewer sends a shorter Hello,
+    // and it must get "wrong version" at once rather than a timeout.
     set_recv_timeout(s, 5000);
     Hello hello{};
-    if (!recv_all(s, &hello, sizeof hello) || std::memcmp(hello.magic, kMagic, 4) != 0) return;
+    constexpr size_t kHead = offsetof(Hello, flags);
+    if (!recv_all(s, &hello, kHead) || std::memcmp(hello.magic, kMagic, 4) != 0) return;
     Welcome w{};
     std::memcpy(w.magic, kMagic, 4);
     w.version = kProtocolVersion;
@@ -111,6 +115,8 @@ void Host::run_session(SOCKET s) {
         send_all(s, &w, sizeof w);
         return;
     }
+    if (!recv_all(s, reinterpret_cast<char*>(&hello) + kHead, sizeof hello - kHead)) return;
+    if (!stream_settings_valid(hello.maxHeight, hello.quality)) return;
     const std::string name(hello.name, strnlen(hello.name, sizeof hello.name));
     const std::string address = peer_address(s);
     const bool wants = (hello.flags & kHelloWantControl) != 0;
@@ -133,6 +139,9 @@ void Host::run_session(SOCKET s) {
     }
     wantsControl_ = wants;
     fullRequested_ = false;
+    wantMaxHeight_ = hello.maxHeight;
+    wantQuality_ = hello.quality;
+    settingsChanged_ = false;
     viewerActive_ = true;
     if (onEvent_) onEvent_(Event::ViewerConnected, viewer_text());
 
@@ -145,7 +154,8 @@ void Host::run_session(SOCKET s) {
     std::vector<uint8_t> lastShapeData;
     int slot = 0;
     bool needFull = true;
-    uint32_t sentW = 0, sentH = 0, seq = 0;
+    uint32_t sentW = 0, sentH = 0, sentFormat = 0, seq = 0;
+    uint32_t maxHeight = wantMaxHeight_, quality = wantQuality_;
     std::string err, lastErr;
 
     // The sender reads mapped staging memory; never unmap/close under it.
@@ -165,9 +175,14 @@ void Host::run_session(SOCKET s) {
     };
 
     while (!dead_ && !stopping_) {
+        if (settingsChanged_.exchange(false)) {
+            maxHeight = wantMaxHeight_;
+            quality = wantQuality_;
+            reopen_ = true;  // stream size may change: rebuild the capture (and resend everything)
+        }
         if (reopen_.exchange(false)) close_capture();
         if (!cap.is_open()) {
-            if (!cap.open(monitor_, err)) {
+            if (!cap.open(monitor_, maxHeight, err)) {
                 if (err != lastErr && onEvent_) onEvent_(Event::Error, err);
                 lastErr = err;
                 std::unique_lock<std::mutex> lock(mu_);
@@ -188,11 +203,13 @@ void Host::run_session(SOCKET s) {
                 push({make_msg(kMsgPointerShape, payload.data(), uint32_t(payload.size()))});
             }
         }
-        if (cap.width() != sentW || cap.height() != sentH) {
-            ModeMsg m{cap.width(), cap.height(), kFormatBGRA8};
+        const uint32_t format = quality ? kFormatEncoded : kFormatBGRA8;
+        if (cap.width() != sentW || cap.height() != sentH || format != sentFormat) {
+            ModeMsg m{cap.width(), cap.height(), format, cap.native_width(), cap.native_height()};
             push({make_msg(kMsgMode, &m, sizeof m)});
             sentW = cap.width();
             sentH = cap.height();
+            sentFormat = format;
             needFull = true;
         }
         const bool grant = wantsControl_ && allowControl_;
@@ -243,23 +260,10 @@ void Host::run_session(SOCKET s) {
         if (job.pointerMoved) push({make_msg(kMsgPointerPos, &job.pointerPos, sizeof job.pointerPos)});
 
         if (job.hasImage) {
-            uint64_t pixelBytes = 0;
-            for (const Rect& r : job.rects) pixelBytes += rect_pixels(r) * 4;
-            const uint32_t meta = uint32_t(sizeof(FrameMsg) + job.moves.size() * sizeof(MoveRect) +
-                                           job.rects.size() * sizeof(Rect));
             OutItem item;
             item.frame = true;
-            item.bytes.resize(sizeof(MsgHeader) + meta);
-            MsgHeader h{kMsgFrame, 0, uint32_t(meta + pixelBytes)};
-            FrameMsg f{seq++, uint16_t(job.moves.size()), uint16_t(job.rects.size())};
-            uint8_t* p = item.bytes.data();
-            std::memcpy(p, &h, sizeof h);
-            p += sizeof h;
-            std::memcpy(p, &f, sizeof f);
-            p += sizeof f;
-            if (!job.moves.empty()) std::memcpy(p, job.moves.data(), job.moves.size() * sizeof(MoveRect));
-            p += job.moves.size() * sizeof(MoveRect);
-            if (!job.rects.empty()) std::memcpy(p, job.rects.data(), job.rects.size() * sizeof(Rect));
+            item.quality = quality;
+            item.seq = seq++;
             item.slot = job.slot;
             if (item.slot >= 0) {
                 std::lock_guard<std::mutex> lock(mu_);
@@ -287,7 +291,14 @@ void Host::run_session(SOCKET s) {
 }
 
 void Host::send_loop(SOCKET s) {
+    ComScope com;
+    RectCodec codec;
+    const bool haveCodec = codec.init();
     std::vector<WSABUF> bufs;
+    std::vector<uint8_t> header;
+    std::vector<RectData> rectData;
+    std::vector<std::vector<uint8_t>> encoded;
+    std::vector<Rect> tiles;
     for (;;) {
         OutItem item;
         {
@@ -298,26 +309,75 @@ void Host::send_loop(SOCKET s) {
             queue_.pop_front();
         }
         bool ok;
-        uint64_t total = item.bytes.size();
-        if (!item.frame || item.slot < 0) {
+        uint64_t total = 0;
+        if (!item.frame) {
             ok = send_all(s, item.bytes.data(), item.bytes.size());
+            total = item.bytes.size();
         } else {
-            // Zero copy: every row goes straight from the mapped staging texture to the socket.
             const CaptureJob& j = item.job;
+            const bool enc = item.quality != 0;
+            // Compressed: split big areas into tiles so each picks its own encoding
+            // (a window with text and a photo: text tiles stay lossless, photo tiles go JPEG).
+            const std::vector<Rect>* rectList = &j.rects;
+            if (enc) {
+                constexpr int32_t kTile = 256;
+                tiles.clear();
+                for (const Rect& r : j.rects)
+                    for (int32_t y = r.top; y < r.bottom; y += kTile)
+                        for (int32_t x = r.left; x < r.right; x += kTile)
+                            tiles.push_back({x, y, std::min(x + kTile, r.right), std::min(y + kTile, r.bottom)});
+                if (tiles.size() <= kMaxRects) rectList = &tiles;
+            }
+            const std::vector<Rect>& rects = *rectList;
+            // Header: MsgHeader, FrameMsg, moves, rects. The size is filled in last.
+            const size_t meta = sizeof(FrameMsg) + j.moves.size() * sizeof(MoveRect) + rects.size() * sizeof(Rect);
+            header.resize(sizeof(MsgHeader) + meta);
+            FrameMsg f{item.seq, uint16_t(j.moves.size()), uint16_t(rects.size())};
+            uint8_t* p = header.data() + sizeof(MsgHeader);
+            std::memcpy(p, &f, sizeof f);
+            p += sizeof f;
+            if (!j.moves.empty()) std::memcpy(p, j.moves.data(), j.moves.size() * sizeof(MoveRect));
+            p += j.moves.size() * sizeof(MoveRect);
+            if (!rects.empty()) std::memcpy(p, rects.data(), rects.size() * sizeof(Rect));
+
             bufs.clear();
-            bufs.push_back({ULONG(item.bytes.size()), reinterpret_cast<char*>(item.bytes.data())});
-            for (const Rect& r : j.rects) {
+            bufs.push_back({ULONG(header.size()), reinterpret_cast<char*>(header.data())});
+            rectData.assign(rects.size(), RectData{});
+            if (encoded.size() < rects.size()) encoded.resize(rects.size());
+            uint64_t payload = meta;
+            for (size_t i = 0; i < rects.size(); ++i) {
+                const Rect& r = rects[i];
                 const ULONG rowBytes = ULONG(r.right - r.left) * 4;
-                const uint8_t* base = j.data + size_t(r.top) * j.pitch + size_t(r.left) * 4;
                 const uint32_t rows = uint32_t(r.bottom - r.top);
+                const uint8_t* base = j.data + size_t(r.top) * j.pitch + size_t(r.left) * 4;
+                const uint64_t raw = uint64_t(rowBytes) * rows;
+                if (enc) {
+                    // Lossless palette for text/UI, JPEG for photos, raw when neither is smaller.
+                    const uint8_t e =
+                        haveCodec ? codec.encode(base, j.pitch, rowBytes / 4, rows, item.quality, encoded[i]) : kRectRaw;
+                    rectData[i].encoding = e;
+                    rectData[i].size = uint32_t(e != kRectRaw ? encoded[i].size() : raw);
+                    bufs.push_back({ULONG(sizeof(RectData)), reinterpret_cast<char*>(&rectData[i])});
+                    payload += sizeof(RectData);
+                    if (e != kRectRaw) {
+                        bufs.push_back({ULONG(encoded[i].size()), reinterpret_cast<char*>(encoded[i].data())});
+                        payload += encoded[i].size();
+                        continue;
+                    }
+                }
+                // Raw rows go straight from the mapped staging texture to the socket.
                 if (rowBytes == j.pitch) {
-                    bufs.push_back({rowBytes * rows, reinterpret_cast<char*>(const_cast<uint8_t*>(base))});
+                    bufs.push_back({ULONG(raw), reinterpret_cast<char*>(const_cast<uint8_t*>(base))});
                 } else {
                     for (uint32_t y = 0; y < rows; ++y)
-                        bufs.push_back({rowBytes, reinterpret_cast<char*>(const_cast<uint8_t*>(base + size_t(y) * j.pitch))});
+                        bufs.push_back(
+                            {rowBytes, reinterpret_cast<char*>(const_cast<uint8_t*>(base + size_t(y) * j.pitch))});
                 }
-                total += uint64_t(rowBytes) * rows;
+                payload += raw;
             }
+            MsgHeader h{kMsgFrame, 0, uint32_t(payload)};
+            std::memcpy(header.data(), &h, sizeof h);
+            total = sizeof h + payload;
             ok = send_gather(s, bufs.data(), bufs.size());
         }
         if (ok) {
@@ -353,6 +413,14 @@ void Host::recv_loop(SOCKET s) {
         } else if (h.type == kMsgRequestFull) {
             if (h.size != 0) break;
             fullRequested_ = true;
+        } else if (h.type == kMsgStreamSettings) {
+            StreamSettingsMsg m;
+            if (h.size != sizeof m || !recv_all(s, &m, sizeof m)) break;
+            if (!stream_settings_valid(m.maxHeight, m.quality)) break;
+            // Only flag it: the capture loop rebuilds the capture once no slot is being sent.
+            wantMaxHeight_ = m.maxHeight;
+            wantQuality_ = m.quality;
+            settingsChanged_ = true;
         } else {
             break;  // unknown message: drop the viewer
         }

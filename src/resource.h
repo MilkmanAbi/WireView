@@ -20,6 +20,7 @@
 #define IDM_TAKE_CONTROL 1030
 #define IDM_ABOUT 1040
 #define IDM_MONITOR_BASE 1100  // + monitor index
+#define IDM_PICTURE_BASE 1200  // + picture preset index
 
 #define IDC_PEERS 2001
 #define IDC_SEARCH 2002
@@ -27,3 +28,4 @@
 #define IDC_PORT 2004
 #define IDC_WANT_CONTROL 2005
 #define IDC_SEARCH_STATUS 2006
+#define IDC_PICTURE 2007

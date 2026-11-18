@@ -10,7 +10,7 @@ namespace wv {
 
 constexpr uint16_t kTcpPort = 47110;
 constexpr uint16_t kUdpPort = 47111;
-constexpr uint16_t kProtocolVersion = 1;
+constexpr uint16_t kProtocolVersion = 2;
 constexpr char kMagic[4] = {'W', 'V', 'W', '1'};
 
 #pragma pack(push, 1)
@@ -20,11 +20,14 @@ struct Rect {
 };
 
 // First bytes the viewer sends after connecting.
+// magic + version come first and never change, so any version can be told "wrong version".
 struct Hello {
     char magic[4];
     uint16_t version;
     uint16_t flags;  // kHelloWantControl
     char name[64];   // UTF-8 computer name, NUL padded
+    uint32_t maxHeight;  // stream settings, see StreamSettingsMsg
+    uint32_t quality;
 };
 constexpr uint16_t kHelloWantControl = 1;
 
@@ -54,14 +57,32 @@ enum MsgType : uint16_t {
     kMsgPointerShape = 4,  // PointerShapeMsg + shape bytes
     kMsgControl = 5,       // ControlMsg
     // viewer -> host
-    kMsgInput = 16,        // InputEvent[] (size is a multiple of 12)
-    kMsgRequestFull = 17,  // empty: please send a full frame
+    kMsgInput = 16,           // InputEvent[] (size is a multiple of 12)
+    kMsgRequestFull = 17,     // empty: please send a full frame
+    kMsgStreamSettings = 18,  // StreamSettingsMsg
 };
 
-constexpr uint32_t kFormatBGRA8 = 1;
+constexpr uint32_t kFormatBGRA8 = 1;  // frame pixels are raw BGRA rows
+constexpr uint32_t kFormatEncoded = 2;  // each rect is RectData + raw rows or a JPEG
 
+// width/height: the stream (frame pixels). nativeWidth/Height: the real screen;
+// pointer positions and input coordinates are always in native pixels.
 struct ModeMsg {
-    uint32_t width, height, format;
+    uint32_t width, height, format, nativeWidth, nativeHeight;
+};
+
+// maxHeight 0 = native resolution, else downscale to that height (240..native).
+// quality 0 = raw pixels, 1..100 = JPEG quality.
+struct StreamSettingsMsg {
+    uint32_t maxHeight, quality;
+};
+
+// kRectPalette: u16 count, u16 0, count x u32 colour, XPRESS-Huffman compressed one-byte indices.
+enum RectEncoding : uint8_t { kRectRaw = 0, kRectJpeg = 1, kRectPalette = 2 };
+struct RectData {
+    uint8_t encoding;
+    uint8_t reserved[3];
+    uint32_t size;  // bytes that follow
 };
 
 struct FrameMsg {
@@ -109,7 +130,9 @@ struct InputEvent {
 
 #pragma pack(pop)
 
-static_assert(sizeof(Hello) == 72);
+static_assert(sizeof(Hello) == 80);
+static_assert(sizeof(ModeMsg) == 20);
+static_assert(sizeof(RectData) == 8);
 static_assert(sizeof(Welcome) == 76);
 static_assert(sizeof(MsgHeader) == 8);
 static_assert(sizeof(FrameMsg) == 8);
@@ -128,6 +151,26 @@ inline uint64_t rect_pixels(const Rect& r) {
 
 // Largest frame payload we accept for a given mode.
 uint64_t max_frame_payload(uint32_t width, uint32_t height);
+uint64_t max_encoded_frame_payload(uint32_t width, uint32_t height);
+
+bool stream_settings_valid(uint32_t maxHeight, uint32_t quality);
+// Stream size for a native screen and a maxHeight setting (keeps aspect, even width).
+void stream_size(uint32_t nativeW, uint32_t nativeH, uint32_t maxHeight, uint32_t& w, uint32_t& h);
+
+// One rect of an encoded frame.
+struct EncodedRect {
+    Rect rect;
+    uint8_t encoding;
+    const uint8_t* data;
+    uint32_t size;
+};
+struct EncodedFrameView {
+    uint32_t seq = 0;
+    const MoveRect* moves = nullptr;
+    uint32_t moveCount = 0;
+    std::vector<EncodedRect> rects;
+};
+bool parse_encoded_frame(const uint8_t* p, size_t n, uint32_t width, uint32_t height, EncodedFrameView& out);
 
 // A parsed frame. Pointers point into the payload buffer.
 struct FrameView {

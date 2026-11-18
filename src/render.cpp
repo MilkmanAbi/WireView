@@ -293,8 +293,8 @@ bool Renderer::draw() {
         ctx_->Draw(3, 0);
 
         if (drawPointer_ && ptrVisible_ && ptrSrv_) {
-            D3D11_VIEWPORT pv{imageRect_.left + ptrX_ * scale, imageRect_.top + ptrY_ * scale, ptrW_ * scale,
-                              ptrH_ * scale, 0, 1};
+            const float ps = scale * ptrScale_;
+            D3D11_VIEWPORT pv{imageRect_.left + ptrX_ * ps, imageRect_.top + ptrY_ * ps, ptrW_ * ps, ptrH_ * ps, 0, 1};
             ctx_->RSSetViewports(1, &pv);
             srv = ptrSrv_.Get();
             ctx_->PSSetShaderResources(0, 1, &srv);

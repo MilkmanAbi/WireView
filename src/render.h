@@ -59,6 +59,8 @@ public:
         ptrVisible_ = visible;
     }
     void set_draw_pointer(bool draw) { drawPointer_ = draw; }
+    // Pointer positions/shapes are in native pixels; the image may be a scaled-down stream.
+    void set_pointer_scale(float streamPerNative) { ptrScale_ = streamPerNative; }
     void set_background(COLORREF c) { background_ = c; }
 
     // Draws and presents. Returns false if the GPU device was lost (call init again).
@@ -83,6 +85,7 @@ private:
     uint32_t ptrW_ = 0, ptrH_ = 0;
     int32_t ptrX_ = 0, ptrY_ = 0;
     bool ptrVisible_ = false, drawPointer_ = true;
+    float ptrScale_ = 1.f;
     GpuImage image_;
     RECT imageRect_{};
     UINT bufW_ = 0, bufH_ = 0;

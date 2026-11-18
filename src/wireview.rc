@@ -28,6 +28,11 @@ BEGIN
     END
     POPUP "&View"
     BEGIN
+        POPUP "P&icture"
+        BEGIN
+            MENUITEM "(presets)", IDM_PICTURE_BASE
+        END
+        MENUITEM SEPARATOR
         MENUITEM "&Full screen\tF11", IDM_FULLSCREEN
         MENUITEM "Show remote &pointer", IDM_SHOW_POINTER
         MENUITEM "&Refresh\tF5", IDM_REFRESH
@@ -50,7 +55,7 @@ BEGIN
     VK_F12, IDM_TAKE_CONTROL, VIRTKEY, CONTROL, ALT
 END
 
-IDD_CONNECT DIALOGEX 0, 0, 260, 186
+IDD_CONNECT DIALOGEX 0, 0, 260, 204
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Connect"
 FONT 8, "MS Shell Dlg"
@@ -63,14 +68,16 @@ BEGIN
     EDITTEXT IDC_ADDRESS, 50, 118, 140, 12, ES_AUTOHSCROLL
     LTEXT "&Port:", -1, 197, 120, 20, 9
     EDITTEXT IDC_PORT, 218, 118, 35, 12, ES_NUMBER
-    AUTOCHECKBOX "Ask to &control the other PC", IDC_WANT_CONTROL, 7, 138, 200, 10
-    DEFPUSHBUTTON "Connect", IDOK, 149, 165, 50, 14
-    PUSHBUTTON "Cancel", IDCANCEL, 203, 165, 50, 14
+    LTEXT "P&icture:", -1, 7, 138, 40, 9
+    COMBOBOX IDC_PICTURE, 50, 136, 203, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    AUTOCHECKBOX "Ask to &control the other PC", IDC_WANT_CONTROL, 7, 156, 200, 10
+    DEFPUSHBUTTON "Connect", IDOK, 149, 183, 50, 14
+    PUSHBUTTON "Cancel", IDCANCEL, 203, 183, 50, 14
 END
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -79,9 +86,9 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "WireView"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileVersion", "0.2.0"
             VALUE "ProductName", "WireView"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.2.0"
             VALUE "LegalCopyright", "GPL-3.0-or-later"
         END
     END

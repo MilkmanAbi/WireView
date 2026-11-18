@@ -9,6 +9,26 @@ uint64_t max_frame_payload(uint32_t width, uint32_t height) {
            uint64_t(width) * height * 4;
 }
 
+uint64_t max_encoded_frame_payload(uint32_t width, uint32_t height) {
+    return max_frame_payload(width, height) + uint64_t(kMaxRects) * sizeof(RectData);
+}
+
+bool stream_settings_valid(uint32_t maxHeight, uint32_t quality) {
+    return (maxHeight == 0 || (maxHeight >= 240 && maxHeight <= kMaxDimension)) && quality <= 100;
+}
+
+void stream_size(uint32_t nativeW, uint32_t nativeH, uint32_t maxHeight, uint32_t& w, uint32_t& h) {
+    if (maxHeight == 0 || maxHeight >= nativeH || nativeH == 0) {
+        w = nativeW;
+        h = nativeH;
+        return;
+    }
+    h = maxHeight;
+    w = uint32_t((uint64_t(nativeW) * maxHeight + nativeH / 2) / nativeH);
+    w = (w + 1) & ~1u;
+    if (w == 0) w = 2;
+}
+
 bool rect_valid(const Rect& r, uint32_t width, uint32_t height) {
     return r.left >= 0 && r.top >= 0 && r.left < r.right && r.top < r.bottom &&
            uint32_t(r.right) <= width && uint32_t(r.bottom) <= height;
@@ -47,6 +67,52 @@ bool parse_frame(const uint8_t* p, size_t n, uint32_t width, uint32_t height, Fr
     out.rectCount = h.rectCount;
     out.pixels = p + meta;
     out.pixelBytes = pixelBytes;
+    return true;
+}
+
+bool parse_encoded_frame(const uint8_t* p, size_t n, uint32_t width, uint32_t height, EncodedFrameView& out) {
+    if (width == 0 || height == 0 || width > kMaxDimension || height > kMaxDimension) return false;
+    if (n < sizeof(FrameMsg) || n > max_encoded_frame_payload(width, height)) return false;
+    FrameMsg h;
+    std::memcpy(&h, p, sizeof h);
+    if (h.moveCount > kMaxRects || h.rectCount > kMaxRects) return false;
+    const uint64_t meta = sizeof(FrameMsg) + uint64_t(h.moveCount) * sizeof(MoveRect) +
+                          uint64_t(h.rectCount) * sizeof(Rect);
+    if (meta > n) return false;
+    const auto* moves = reinterpret_cast<const MoveRect*>(p + sizeof(FrameMsg));
+    for (uint32_t i = 0; i < h.moveCount; ++i) {
+        const MoveRect& m = moves[i];
+        if (!rect_valid(m.dst, width, height)) return false;
+        const Rect src{m.srcX, m.srcY, m.srcX + (m.dst.right - m.dst.left), m.srcY + (m.dst.bottom - m.dst.top)};
+        if (!rect_valid(src, width, height)) return false;
+    }
+    const auto* rects = reinterpret_cast<const Rect*>(p + sizeof(FrameMsg) + h.moveCount * sizeof(MoveRect));
+    out.rects.clear();
+    uint64_t pos = meta, rawTotal = 0;
+    for (uint32_t i = 0; i < h.rectCount; ++i) {
+        const Rect r = rects[i];
+        if (!rect_valid(r, width, height)) return false;
+        if (pos + sizeof(RectData) > n) return false;
+        RectData d;
+        std::memcpy(&d, p + pos, sizeof d);
+        pos += sizeof d;
+        const uint64_t raw = rect_pixels(r) * 4;
+        rawTotal += raw;
+        if (d.size > n - pos) return false;
+        if (d.encoding == kRectRaw) {
+            if (d.size != raw) return false;
+        } else if (d.encoding == kRectJpeg || d.encoding == kRectPalette) {
+            if (d.size == 0 || d.size > raw) return false;  // the host sends raw when encoding isn't smaller
+        } else {
+            return false;
+        }
+        out.rects.push_back({r, d.encoding, p + pos, d.size});
+        pos += d.size;
+    }
+    if (pos != n || rawTotal > uint64_t(width) * height * 4) return false;
+    out.seq = h.seq;
+    out.moves = moves;
+    out.moveCount = h.moveCount;
     return true;
 }
 

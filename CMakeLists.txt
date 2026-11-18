@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(WireView VERSION 0.1.0 LANGUAGES CXX RC)
+project(WireView VERSION 0.2.0 LANGUAGES CXX RC)
 
 if(NOT WIN32)
   message(FATAL_ERROR "WireView is a Windows program")
@@ -19,10 +19,11 @@ add_library(wvcore STATIC
   src/viewer.cpp
   src/render.cpp
   src/cursor.cpp
+  src/codec.cpp
 )
 target_include_directories(wvcore PUBLIC src)
 target_compile_definitions(wvcore PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
-target_link_libraries(wvcore PUBLIC ws2_32 iphlpapi d3d11 dxgi d3dcompiler user32 gdi32)
+target_link_libraries(wvcore PUBLIC ws2_32 iphlpapi d3d11 dxgi d3dcompiler user32 gdi32 ole32 oleaut32 windowscodecs cabinet)
 if(MSVC)
   target_compile_options(wvcore PUBLIC /W4 /utf-8 /permissive- /wd4100)
 endif()
