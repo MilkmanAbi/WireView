@@ -682,6 +682,63 @@ static void test_loopback() {
         for (int i = 0; i < 100 && host.has_viewer(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
+    // 6b. Switching the picture during a session (the capture is rebuilt while frames are in flight).
+    {
+        TestViewer sv;
+        sv.start(port, false, 0, 0);
+        CHECK(sv.wait_for(ViewerConn::Event::Connected, 5000));
+        uint32_t sw = 0, sh = 0, nw = 0, fmt = 0;
+        int modes = 0, bad3 = 0, fullAfterMode = 0;
+        bool sawFull = false;
+        auto run = [&](int ms, bool spam) {
+            const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+            int k = 0;
+            while (std::chrono::steady_clock::now() < end) {
+                if (spam && (++k % 5) == 0) sv.conn.request_full();  // keep a slot busy across the switch
+                std::deque<ViewerConn::Packet> q;
+                sv.conn.take(q);
+                for (auto& p : q) {
+                    if (p.type == kMsgMode) {
+                        ModeMsg m;
+                        std::memcpy(&m, p.data.data(), sizeof m);
+                        sw = m.width, sh = m.height, nw = m.nativeWidth, fmt = m.format;
+                        ++modes;
+                        sawFull = false;
+                    } else if (p.type == kMsgFrame) {
+                        FrameView f;
+                        if (!parse_frame(p.data.data(), p.data.size(), sw, sh, f)) {
+                            ++bad3;
+                        } else {
+                            uint64_t covered = 0;
+                            for (uint32_t i = 0; i < f.rectCount; ++i) covered += rect_pixels(f.rects[i]);
+                            if (!sawFull && f.moveCount == 0 && covered == uint64_t(sw) * sh) {
+                                sawFull = true;
+                                ++fullAfterMode;
+                            }
+                        }
+                    }
+                    sv.conn.recycle(std::move(p.data));
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        };
+        run(800, true);
+        CHECK(fmt == kFormatBGRA8 && sw == nw);
+        sv.conn.set_stream(720, 75);
+        run(1500, true);
+        std::printf("  switch to 720p: mode %ux%u format %u\n", sw, sh, fmt);
+        CHECK(sh == 720 && fmt == kFormatEncoded);
+        sv.conn.set_stream(0, 0);
+        run(1500, true);
+        std::printf("  switch back: mode %ux%u format %u, %d modes, %d full-after-mode, %d bad\n", sw, sh, fmt, modes,
+                    fullAfterMode, bad3);
+        CHECK(sw == nw && fmt == kFormatBGRA8);
+        CHECK(modes == 3 && fullAfterMode == 3 && bad3 == 0);
+        CHECK(sv.conn.error().empty());
+        sv.conn.stop();
+        for (int i = 0; i < 100 && host.has_viewer(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
     // 7. A 0.1.0 viewer (72-byte Hello, version 1) is told "wrong version" at once, not after a timeout.
     {
         SOCKET s = tcp_connect("127.0.0.1", port, 3000, err);

@@ -6,6 +6,16 @@
 
 namespace wv {
 
+// Closing with unread bytes makes Windows send a reset, which can overtake the Welcome we
+// just sent. Finish sending, read what's left, then let the caller close.
+static void close_gently(SOCKET s) {
+    shutdown(s, SD_SEND);
+    set_recv_timeout(s, 500);
+    char buf[256];
+    while (recv(s, buf, sizeof buf, 0) > 0) {
+    }
+}
+
 void join_plain(std::thread& t) {
     if (t.joinable()) t.join();
 }
@@ -113,6 +123,7 @@ void Host::run_session(SOCKET s) {
     if (hello.version != kProtocolVersion) {
         w.status = kWelcomeBadVersion;
         send_all(s, &w, sizeof w);
+        close_gently(s);
         return;
     }
     if (!recv_all(s, reinterpret_cast<char*>(&hello) + kHead, sizeof hello - kHead)) return;
@@ -123,6 +134,7 @@ void Host::run_session(SOCKET s) {
     if (stopping_ || dead_ || (accept_ && !accept_(address, name, wants)) || stopping_) {
         w.status = kWelcomeRejected;
         send_all(s, &w, sizeof w);
+        close_gently(s);
         return;
     }
     bool granted = wants && allowControl_;
