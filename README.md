@@ -14,7 +14,7 @@ Windows 11 creates a network adapter when two USB4 PCs are joined by a USB4 (or 
 - **Upload only changed rectangles on the receiving side,** draw with Direct3D 11, never queue frames.
 - **Control** is a small side channel: 12-byte mouse and keyboard events, replayed with `SendInput` on the shared PC.
 
-Bandwidth for full-screen motion is roughly width x height x 4 x fps: a 1920x1080 screen at 60 fps is about 4 Gbit/s. A typical desktop is far less because only changed areas are sent. USB4 links are 20 or 40 Gbit/s.
+Bandwidth for full-screen motion is roughly width x height x 4 x fps: a 1920x1080 screen at 60 fps is about 4 Gbit/s. A typical desktop is far less because only changed areas are sent. USB4 links are 20 or 40 Gbit/s; that is the link rate, and what TCP actually gets over Windows' USB4 network adapter has not been measured yet. The status bar shows the live frame rate and Gbit/s on both sides.
 
 Any IPv4 network works too (Ethernet, Wi-Fi), but at Wi-Fi speeds raw frames will be slow when a lot of the screen changes.
 

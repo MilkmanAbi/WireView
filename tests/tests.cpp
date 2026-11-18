@@ -479,6 +479,11 @@ static void test_loopback() {
         }
     }
     host.stop();
+    // The host closed connections itself (TIME_WAIT on its port): sharing must still restart.
+    err.clear();
+    CHECK(host.start(port, err));
+    if (!err.empty()) std::printf("  restart: %s\n", err.c_str());
+    host.stop();
 }
 
 static void test_discovery() {
